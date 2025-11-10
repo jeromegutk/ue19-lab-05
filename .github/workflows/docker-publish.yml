@@ -1,4 +1,4 @@
-name: Build and publish Docker image to GHCR
+name: Build, scan and publish Docker image to GHCR
 
 on:
   push:
@@ -6,15 +6,15 @@ on:
       - main
 
 permissions:
-  contents: read         
-  packages: write   
+  contents: read          # pour checkout
+  packages: write         # pour pousser sur GHCR
 
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ue19-lab-05
 
 jobs:
-  build-and-push:
+  build-scan-and-push:
     runs-on: ubuntu-latest
 
     steps:
@@ -28,18 +28,35 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract metadata (tags, labels) for Docker
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: |
-            ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}
+      # 1. Build local image (mais NE LA PUBLIE PAS encore)
+      - name: Build Docker image
+        run: |
+          IMAGE=${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}
+          docker build -t $IMAGE:${{ github.sha }} .
+          # Tag "latest" aussi, on la poussera seulement si le scan passe
+          docker tag $IMAGE:${{ github.sha }} $IMAGE:latest
 
-      - name: Build and push Docker image
-        uses: docker/build-push-action@v6
+      # 2. Scanner l'image avec Trivy AVANT push
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@0.28.0
         with:
-          context: .
-          file: ./Dockerfile
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          image-ref: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          format: 'table'
+          vuln-type: 'os,library'
+          severity: 'HIGH,CRITICAL'
+          ignore-unfixed: true
+          exit-code: '1'         # si HIGH/CRITICAL → le job échoue → on ne publie pas
+          timeout: '5m'
+          hide-progress: true
+        env:
+          # conseillé par la doc pour rendre le cache persistant dans GitHub Actions
+          TRIVY_DB_REPOSITORY: ghcr.io/aquasecurity/trivy-db:2
+          TRIVY_JAVA_DB_REPOSITORY: ghcr.io/aquasecurity/trivy-java-db:1
+
+      # 3. Si le scan passe (step Trivy OK), on pousse vers GHCR
+      - name: Push Docker image to GHCR
+        if: success()
+        run: |
+          IMAGE=${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}
+          docker push $IMAGE:${{ github.sha }}
+          docker push $IMAGE:latest
